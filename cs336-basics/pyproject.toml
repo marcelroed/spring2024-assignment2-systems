@@ -1,0 +1,29 @@
+[build-system]
+requires = [
+    "setuptools >= 61.0",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs336-basics"
+description = ""
+version = "0.1.7-dev"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    "torch>=2.3",
+    "numpy",
+    "regex",
+]
+
+# authors = [
+#     {name = "Marcel Rød", email = "roed@stanford.edu"},
+# ]
+
+# [tool.setuptools.packages.find]
+# include = ["dogma*"]
+
+# [project.scripts]
+# dogma-train = "dogma.train:main"
+

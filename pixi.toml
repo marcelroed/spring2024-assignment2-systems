@@ -1,0 +1,20 @@
+[project]
+name = "spring2024-assignment2-systems"
+version = "0.1.0"
+description = "Add a short description here"
+authors = ["Marcel Rød <marcelroed@gmail.com>"]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[system-requirements]
+linux = "5.4.0"
+
+[tasks]
+
+[dependencies]
+python = ">=3.11,<3.12"
+
+[pypi-dependencies]
+regex = "*"
+torch = ">=2.3.0"
+numpy = "*"
