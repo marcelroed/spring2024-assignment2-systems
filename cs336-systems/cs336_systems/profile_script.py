@@ -100,9 +100,9 @@ def perform_all_profiles_norm(include_warmup: bool, mixed_precision=False):
         for norm_class in [RMSNorm, nn.LayerNorm, RMSNormTriton]:
             model = initialize_model(**value, norm_class=norm_class)  # Reinitialize every loop to show effect of warmup
             # for p in ['forward', 'backward', 'both']:
-            for p in ['forward']:
+            for p in ['forward', 'backward']:
                 mean, std = profile_model(model, batch, warmup_steps=5 if include_warmup else 0, profile_steps=5, passes=p, mixed_precision=mixed_precision)
-                print(f'[{key}], [{p}], [{norm_class.__name__}], [${mean:.2e}$], [${std:.2e}$]')
+                print(f'[{key}], [{p}], [{norm_class.__name__}], [${mean:.2e}$], [${std:.2e}$],')
                 gc.collect()
                 torch.cuda.empty_cache()
             del model
@@ -176,15 +176,19 @@ def test_mp(dtype=torch.float16):
     with torch.autocast('cuda', dtype=dtype):
         out = model(batch)
     
-def norm_bench():
+def norm_bench(include_backward: bool):
     n_rows = 50_000
-    for ln_type in [nn.LayerNorm, RMSNorm, RMSNormTriton]:
+    seen_rms_norm = False
+    for ln_type in [nn.LayerNorm, RMSNorm, RMSNormTriton, RMSNorm]:
         for n_cols in [1024, 2048, 4096, 8192]:
             x = torch.randn(n_rows, n_cols, device='cuda')
             w = torch.randn(n_cols, device='cuda')
+            dy = torch.randn_like(x, device='cuda')
             if 'RMSNorm' in ln_type.__name__:
                 ln = ln_type(n_cols).to('cuda')
                 ln.weight.data[:] = w
+                if not seen_rms_norm and ln_type == RMSNorm:
+                    ln = torch.compile(ln)
             else:
                 b = torch.randn_like(w)
                 ln = ln_type(n_cols).to('cuda')
@@ -194,12 +198,20 @@ def norm_bench():
             start = timer()
             for _ in range(5):
                 y = ln(x)  # warmup
+                if include_backward:
+                    x.grad = None
+                    y.backward(dy)
                 torch.cuda.synchronize()
             for _ in range(1_000):
                 y = ln(x)
+                if include_backward:
+                    y.grad = None
+                    y.backward(dy)
                 torch.cuda.synchronize()
             end = timer()
-            print(f'[{ln_type.__name__}], [{n_cols}], [{(end - start)/1_000:.3e}]')
+            print(f'[{ln_type.__name__ + (" Compiled" if not seen_rms_norm and RMSNorm == ln_type else "")}], [{n_cols}], [${(end - start)/1_000:.3e}$],')
+        if 'RMSNorm' in ln_type.__name__:
+            seen_rms_norm = True
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -223,6 +235,6 @@ if __name__ == '__main__':
     # norm_bench()
 
     # (rmsnorm_forward_benchmarking)
-    norm_bench()
+    norm_bench(include_backward=True)
     # perform_all_profiles_norm(include_warmup=True, mixed_precision=False)
 
