@@ -1,5 +1,5 @@
 regex
-torch~=2.2.1
+torch==2.3.0
 numpy
 matplotlib
 # Includes a bugfix for recent NCCL versions
