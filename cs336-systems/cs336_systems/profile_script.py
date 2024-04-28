@@ -94,13 +94,15 @@ def perform_all_profiles(include_warmup: bool, mixed_precision=False, norm_class
         gc.collect()
         torch.cuda.empty_cache()
 
-def perform_all_profiles_norm(include_warmup: bool, mixed_precision=False):
+def perform_all_profiles_norm(include_warmup: bool, passes: list[str] = ['forward', 'backward'], mixed_precision=False, compile=False):
     batch = get_random_batch(batch_size=args.batch_size, context_length=128, vocab_size=10_000)
     for key, value in configs.items():
-        for norm_class in [RMSNorm, nn.LayerNorm, RMSNormTriton]:
+        for norm_class in [RMSNorm, nn.LayerNorm, RMSNormTriton] if not compile else [RMSNorm]:
             model = initialize_model(**value, norm_class=norm_class)  # Reinitialize every loop to show effect of warmup
+            if compile:
+                model = torch.compile(model)
             # for p in ['forward', 'backward', 'both']:
-            for p in ['forward', 'backward']:
+            for p in passes:
                 mean, std = profile_model(model, batch, warmup_steps=5 if include_warmup else 0, profile_steps=5, passes=p, mixed_precision=mixed_precision)
                 print(f'[{key}], [{p}], [{norm_class.__name__}], [${mean:.2e}$], [${std:.2e}$],')
                 gc.collect()
@@ -213,6 +215,9 @@ def norm_bench(include_backward: bool):
         if 'RMSNorm' in ln_type.__name__:
             seen_rms_norm = True
 
+def memory_profile():
+    
+
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--d_model', type=int, default=768)
@@ -235,6 +240,7 @@ if __name__ == '__main__':
     # norm_bench()
 
     # (rmsnorm_forward_benchmarking)
-    norm_bench(include_backward=True)
-    # perform_all_profiles_norm(include_warmup=True, mixed_precision=False)
+    # norm_bench(include_backward=True)
+
+    perform_all_profiles_norm(include_warmup=True, mixed_precision=False, compile=False, passes=['forward', 'both'])
 

@@ -61,13 +61,12 @@ def rmsnorm_forward(
     x_sum = tl.sum(x_sqr, axis=0)
     x_mean = x_sum / x_row_stride + eps
 
-    out_start_ptr = out_ptr + row_idx * x_row_stride
-    out_ptrs = out_start_ptr + offsets
-
     normalized = x_vals / tl.sqrt(x_mean)
     gate = tl.load(g_ptr + offsets, mask=mask, other=0.0)
     gated = normalized * gate
 
+    out_start_ptr = out_ptr + row_idx * x_row_stride
+    out_ptrs = out_start_ptr + offsets
     tl.store(out_ptrs, gated, mask=mask)
 
 @triton.jit
@@ -76,15 +75,15 @@ def rmsnorm_backward(
     x_ptr: tl.pointer_type,  # [N, H]
     g_ptr: tl.pointer_type,  # [H]
     grad_x_ptr: tl.pointer_type,  # [N, H]
-    grad_g_partial_ptr: tl.pointer_type,  # [GROUP_SIZE_M, H]
+    grad_g_partial_ptr: tl.pointer_type,  # [GROUP_SIZE_N, H]
     Lock: tl.pointer_type,
     x_row_stride: tl.uint32,
-    GROUP_SIZE_M: tl.constexpr,
+    GROUP_SIZE_N: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
 
-    lock_id = row_idx % GROUP_SIZE_M
+    lock_id = row_idx % GROUP_SIZE_N
     Lock += lock_id
 
     row_start_ptr = x_ptr + row_idx * x_row_stride
@@ -130,17 +129,17 @@ def rmsnorm_backward(
 def rmsnorm_backward_grad_g(
     grad_g_partials_ptr: tl.pointer_type,  # [GROUP_SIZE_M, H]
     grad_g_ptr: tl.pointer_type,  # [H]
-    GROUP_SIZE_M: tl.constexpr,
+    GROUP_SIZE_N: tl.constexpr,
     x_row_stride: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_H: tl.constexpr
 ):
     pid = tl.program_id(0)
-    cols = pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    grad_g = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for i in range(0, GROUP_SIZE_M, BLOCK_SIZE_M):
-        rows = i + tl.arange(0, BLOCK_SIZE_M)
-        mask = (rows[:, None] < GROUP_SIZE_M) & (cols[None, :] < x_row_stride)
+    cols = pid * BLOCK_SIZE_H + tl.arange(0, BLOCK_SIZE_H)
+    grad_g = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_H), dtype=tl.float32)
+    for i in range(0, GROUP_SIZE_N, BLOCK_SIZE_N):
+        rows = i + tl.arange(0, BLOCK_SIZE_N)
+        mask = (rows[:, None] < GROUP_SIZE_N) & (cols[None, :] < x_row_stride)
         offset = rows[:, None] * x_row_stride + cols[None, :]
         grad_g += tl.load(grad_g_partials_ptr + offset, mask=mask, other=0.0)
 
@@ -169,26 +168,26 @@ class RMSNormAutogradFunctionTriton(torch.autograd.Function):
         N, H = x_flat.shape
         grad_out = grad_out.view(-1, H)
 
-        if H <= 8192: GROUP_SIZE_M = 96
-        if H <= 4096: GROUP_SIZE_M = 128
-        if H <= 1024: GROUP_SIZE_M = 256
+        if H <= 8192: GROUP_SIZE_N = 96
+        if H <= 4096: GROUP_SIZE_N = 128
+        if H <= 1024: GROUP_SIZE_N = 256
 
         grad_g = torch.zeros_like(g)
-        grad_g_partial = torch.zeros((GROUP_SIZE_M, H), device=g.device, dtype=g.dtype)
-        lock = torch.zeros(GROUP_SIZE_M, dtype=torch.int32, device=g.device)
+        grad_g_partial = torch.zeros((GROUP_SIZE_N, H), device=g.device, dtype=g.dtype)
+        lock = torch.zeros(GROUP_SIZE_N, dtype=torch.int32, device=g.device)
 
         grad_x = torch.empty_like(x_flat)
 
         rmsnorm_backward[
             (N,)
         ](
-            grad_out, x_flat, g, grad_x, grad_g_partial, lock, x_row_stride=H, num_warps=ctx.num_warps, GROUP_SIZE_M=GROUP_SIZE_M, BLOCK_SIZE_N=ctx.BLOCK_SIZE,
+            grad_out, x_flat, g, grad_x, grad_g_partial, lock, x_row_stride=H, num_warps=ctx.num_warps, GROUP_SIZE_N=GROUP_SIZE_N, BLOCK_SIZE_N=ctx.BLOCK_SIZE,
         )
 
         rmsnorm_backward_grad_g[
             lambda meta: [triton.cdiv(H, meta['BLOCK_SIZE_N'])]
         ](
-            grad_g_partial, grad_g, min(GROUP_SIZE_M, N), H, BLOCK_SIZE_M=32, BLOCK_SIZE_N=128, num_ctas=1
+            grad_g_partial, grad_g, min(GROUP_SIZE_N, N), H, BLOCK_SIZE_N=32, BLOCK_SIZE_H=128, num_ctas=1
         )
 
         grad_x = grad_x.view(in_shape)
