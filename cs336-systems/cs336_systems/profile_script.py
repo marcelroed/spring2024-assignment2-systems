@@ -22,7 +22,7 @@ def initialize_model(
     attn_pdrop: float | None = None,
     residual_pdrop: float | None = None,
     norm_class: type = RMSNorm,
-):
+) -> BasicsTransformerLM:
     if d_ff is None:
         d_ff = 4 * d_model
     model = BasicsTransformerLM(
@@ -111,17 +111,19 @@ def perform_all_profiles_norm(include_warmup: bool, passes: list[str] = ['forwar
             gc.collect()
             torch.cuda.empty_cache()
 
-def run_step(model, batch, optimizer, enable_backward: bool, enable_optimizer: bool):
-    with record_function('forward_pass'):
-        loss = cross_entropy(model(batch[0]), batch[1])
-    
-    if enable_backward:
-        with record_function('backward_pass'):
-            loss.backward()
-        if enable_optimizer:
-            with record_function('optimizer'):
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+def run_step(model, batch, optimizer, enable_backward: bool, enable_optimizer: bool, mixed_precision=False):
+    context = torch.autocast('cuda', dtype=torch.bfloat16) if mixed_precision else nullcontext()
+    with context:
+        with record_function('forward_pass'):
+            loss = cross_entropy(model(batch[0]), batch[1])
+        
+        if enable_backward:
+            with record_function('backward_pass'):
+                loss.backward()
+            if enable_optimizer:
+                with record_function('optimizer'):
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
 
 def run_pytorch_profile(enable_backward=True, enable_optimizer=True):
     model = initialize_model(**configs['xl'])
@@ -215,7 +217,41 @@ def norm_bench(include_backward: bool):
         if 'RMSNorm' in ln_type.__name__:
             seen_rms_norm = True
 
-def memory_profile():
+def memory_profile(enable_backward: bool, enable_optimizer: bool, mixed_precision: bool = False):
+    torch.cuda.memory._record_memory_history(max_entries=1_000_000)
+    n_steps = 3
+
+    model = initialize_model(**configs['xl'])
+    device = model.lm_head.weight.device
+    batch = get_random_batch(batch_size=args.batch_size, context_length=128, vocab_size=10_000)
+    optimizer = AdamW(model.parameters(), lr=1e-4)
+
+    # warmup
+    loss = cross_entropy(model(batch[0]), batch[1])
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    torch.cuda.synchronize()
+
+    with profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=n_steps),
+        experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    ) as prof:
+        for _ in range(n_steps):
+            # Run on a batch
+            run_step(model, batch, optimizer, enable_backward=enable_backward, enable_optimizer=enable_optimizer, mixed_precision=mixed_precision)
+            prof.step()
+        # Save timeline
+        prof.export_memory_timeline('timeline.html', device=device)
+    torch.cuda.memory._dump_snapshot('memory_snapshot.pickle')
+    torch.cuda.memory._record_memory_history(enabled=None)
     
 
 if __name__ == '__main__':
@@ -242,5 +278,9 @@ if __name__ == '__main__':
     # (rmsnorm_forward_benchmarking)
     # norm_bench(include_backward=True)
 
-    perform_all_profiles_norm(include_warmup=True, mixed_precision=False, compile=False, passes=['forward', 'both'])
+    # perform_all_profiles_norm(include_warmup=True, mixed_precision=False, compile=False, passes=['forward', 'both'])
+
+    # (memory_profiling)
+    memory_profile(enable_backward=False, enable_optimizer=False, mixed_precision=False)
+
 
