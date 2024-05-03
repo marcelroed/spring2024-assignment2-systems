@@ -8,7 +8,6 @@ from timeit import default_timer as timer
 import numpy as np
 from collections import defaultdict as dd
 
-is_multinode = True
 
 # First is for warmup
 tensor_sizes = np.array([256_000, 512_000, 1_000_000, 10_000_000, 50_000_000, 100_000_000, 500_000_000, 1_000_000_000]) // 4
@@ -83,4 +82,5 @@ def main():
 
 
 if __name__ == '__main__':
+    is_multinode = True
     main()
