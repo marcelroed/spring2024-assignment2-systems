@@ -22,7 +22,6 @@ def compute_rmsnorm_backward_x(grad_out, x, g):
     gxgrad = (x * gj * grad_out).sum(-1, keepdim=True)
 
     out = (gj * grad_out - x * gxgrad / (d * ms)) * torch.rsqrt(ms)
-    print(out.shape)
     return out.view(*x_shape)
 
 class RMSNormAutogradFunction(torch.autograd.Function):

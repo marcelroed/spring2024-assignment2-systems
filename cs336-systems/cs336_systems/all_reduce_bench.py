@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import Literal
 import os
 import torch
@@ -6,6 +7,8 @@ import torch.multiprocessing as mp
 from timeit import default_timer as timer
 import numpy as np
 from collections import defaultdict as dd
+
+is_multinode = True
 
 # First is for warmup
 tensor_sizes = np.array([256_000, 512_000, 1_000_000, 10_000_000, 50_000_000, 100_000_000, 500_000_000, 1_000_000_000]) // 4
@@ -17,15 +20,22 @@ def format_bytes(n_bytes):
         n_bytes /= 1000
     return f'${n_bytes:.0f}$ TB'
 
-def setup(rank, world_size, backend: Literal['gloo', 'nccl'] = 'gloo'):
+def setup(rank, world_size: int, backend: Literal['gloo', 'nccl'] = 'gloo'):
     if not is_multinode:
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = '29500'
     dist.init_process_group(backend, rank=rank, world_size=world_size)
 
+def setup_multinode(backend: Literal['gloo', 'nccl']):
+    dist.init_process_group(backend, timeout=timedelta(seconds=60))
 
-def distributed_bench(rank, world_size, result_queue, backend, device_type='cpu'):
-    setup(rank, world_size, backend)
+
+def distributed_bench(rank, world_size, result_queue, backend, device_type='cpu', multinode=False):
+    if is_multinode:
+        setup_multinode(backend)
+        rank, local_rank, world_size = int(os.environ['RANK']), int(os.environ['LOCAL_RANK']), int(os.environ['WORLD_SIZE'])
+    else:
+        setup(rank, world_size, backend)
     if device_type == 'cuda':
         device = f'cuda:{rank}'
     else:
@@ -40,7 +50,7 @@ def distributed_bench(rank, world_size, result_queue, backend, device_type='cpu'
         end = timer()
         result_queue.send((tensor_size, end - start))
 
-def run_bench(backend, device_type, world_size):
+def run_bench(backend, device_type, world_size, multinode=False):
     parent_conn, child_conn = mp.Pipe()
     mp.spawn(fn=distributed_bench, nprocs=world_size, args=(world_size, child_conn, backend, device_type), join=True)
     results = [parent_conn.recv() for _ in range(world_size * len(tensor_sizes))]
@@ -62,6 +72,4 @@ def run_all_benches():
 
 
 if __name__ == '__main__':
-    is_multinode = 'MASTER_ADDR' in os.environ
     run_all_benches()
-
