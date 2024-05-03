@@ -34,6 +34,7 @@ def distributed_bench(rank, world_size, result_queue, backend, device_type='cpu'
     if is_multinode:
         setup_multinode(backend)
         rank, local_rank, world_size = int(os.environ['RANK']), int(os.environ['LOCAL_RANK']), int(os.environ['WORLD_SIZE'])
+        print(f'Rank: {rank}, Local Rank: {local_rank}, World Size: {world_size}')
     else:
         setup(rank, world_size, backend)
     if device_type == 'cuda':
