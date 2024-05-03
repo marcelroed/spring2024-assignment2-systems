@@ -26,6 +26,7 @@ def setup(rank, world_size: int, backend: Literal['gloo', 'nccl'] = 'gloo'):
     dist.init_process_group(backend, rank=rank, world_size=world_size)
 
 def setup_multinode(backend: Literal['gloo', 'nccl']):
+    print(f'Initializing backend {backend} multinode')
     dist.init_process_group(backend, timeout=timedelta(seconds=60))
 
 
