@@ -52,7 +52,8 @@ def distributed_bench(rank, world_size, backend, device_type='cpu'):
             torch.cuda.synchronize(device=device)
         end = timer()
         mean_time = torch.tensor(start - end, device=device)
-        dist.all_reduce(mean_time, op=dist.ReduceOp.AVG, async_op=False)
+        dist.all_reduce(mean_time, op=dist.ReduceOp.SUM, async_op=False)
+        mean_time /= world_size
         if rank == 0:
             print(f'[{backend.upper()} + {device_type.upper()}], [{format_bytes(tensor_size * 4)}], [${world_size}$], [${mean_time:.2e}$],')
 
