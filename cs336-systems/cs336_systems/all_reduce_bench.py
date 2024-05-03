@@ -33,7 +33,6 @@ def setup_multinode(backend: Literal['gloo', 'nccl']):
 def distributed_bench(rank, world_size, backend, device_type='cpu'):
     if is_multinode:
         print(f'Setting up with {os.environ}')
-        setup_multinode(backend)
         rank, local_rank, world_size = int(os.environ['RANK']), int(os.environ['LOCAL_RANK']), int(os.environ['WORLD_SIZE'])
         print(f'Rank: {rank}, Local Rank: {local_rank}, World Size: {world_size}')
     else:
@@ -72,10 +71,10 @@ def run_all_benches():
                 # print('running bench for', backend, device_type, tensor_size, world_size)
                 run_bench(backend, device_type, world_size)  # Loops tensor_sizes within run
 
-def run_all_benches_multinode():
-    for backend in ['nccl', 'gloo']:
-        for device_type in ['cpu', 'cuda'] if backend == 'gloo' else ['cuda']:
-            run_bench_multinode(backend, device_type)
+def run_all_benches_multinode(backend='nccl'):
+    setup_multinode(backend)
+    for device_type in ['cpu', 'cuda'] if backend == 'gloo' else ['cuda']:
+        run_bench_multinode(backend, device_type)
 
 
 def main():
