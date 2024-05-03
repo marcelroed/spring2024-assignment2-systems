@@ -32,7 +32,7 @@ def setup_multinode(backend: Literal['gloo', 'nccl']):
 
 def distributed_bench(rank, world_size, backend, device_type='cpu'):
     if is_multinode:
-        print(f'Setting up with {os.environ}')
+        # print(f'Setting up with {os.environ}')
         rank, local_rank, world_size = int(os.environ['RANK']), int(os.environ['LOCAL_RANK']), int(os.environ['WORLD_SIZE'])
         print(f'Rank: {rank}, Local Rank: {local_rank}, World Size: {world_size}')
     else:
