@@ -66,7 +66,7 @@ def run_bench_multinode(backend, device_type):
     distributed_bench(rank, world_size, backend, device_type)
 
 def run_all_benches():
-    for backend in ['gloo', 'nccl']:
+    for backend in ['nccl', 'gloo']:
         for device_type in ['cpu', 'cuda'] if backend == 'gloo' else ['cuda']:
             for world_size in 2, 4, 6:
                 # print('running bench for', backend, device_type, tensor_size, world_size)
