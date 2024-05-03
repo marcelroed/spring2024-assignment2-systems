@@ -79,7 +79,7 @@ def run_all_benches_multinode(backend='nccl'):
 
 def main():
     print('Running benches')
-    run_all_benches_multinode()
+    run_all_benches_multinode(backend='gloo')
 
 
 if __name__ == '__main__':
