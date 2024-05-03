@@ -79,4 +79,5 @@ def run_all_benches_multinode():
 
 
 if __name__ == '__main__':
-    run_all_benches()
+    print('Running benches')
+    run_all_benches_multinode()
