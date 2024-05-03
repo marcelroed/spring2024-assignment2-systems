@@ -30,7 +30,7 @@ def setup_multinode(backend: Literal['gloo', 'nccl']):
     dist.init_process_group(backend, timeout=timedelta(seconds=60))
 
 
-def distributed_bench(rank, world_size, result_queue, backend, device_type='cpu', multinode=False):
+def distributed_bench(rank, world_size, backend, device_type='cpu'):
     if is_multinode:
         print(f'Setting up with {os.environ}')
         setup_multinode(backend)
@@ -42,28 +42,28 @@ def distributed_bench(rank, world_size, result_queue, backend, device_type='cpu'
         device = f'cuda:{rank}'
     else:
         device = 'cpu'
-    for tensor_size in tensor_sizes:
+    for i, tensor_size in enumerate(tensor_sizes):
         data = torch.randn((tensor_size,), device=device)
+        if device != 'cpu':
+            torch.cuda.synchronize()
         dist.barrier()
         start = timer()
         dist.all_reduce(data, op=dist.ReduceOp.SUM, async_op=False)
         if device != 'cpu':
             torch.cuda.synchronize(device=device)
         end = timer()
-        result_queue.send((tensor_size, end - start))
+        mean_time = torch.tensor(start - end)
+        dist.all_reduce(mean_time, op=dist.ReduceOp.AVG, async_op=False)
+        if rank == 0:
+            print(f'[{backend.upper()} + {device_type.upper()}], [{format_bytes(tensor_size * 4)}], [${world_size}$], [${mean_time:.2e}$],')
 
-def run_bench(backend, device_type, world_size, multinode=False):
-    parent_conn, child_conn = mp.Pipe()
-    mp.spawn(fn=distributed_bench, nprocs=world_size, args=(world_size, child_conn, backend, device_type), join=True)
-    results = [parent_conn.recv() for _ in range(world_size * len(tensor_sizes))]
-    d = dd(list)
-    for tensor_size, time in results:
-        d[tensor_size].append(time)
+def run_bench(backend, device_type, world_size):
+    mp.spawn(fn=distributed_bench, nprocs=world_size, args=(world_size, backend, device_type), join=True)
 
-    for tensor_size, times in d.items():
-        mean_time = np.mean(times)
-        print(f'[{backend.upper()} + {device_type.upper()}], [{format_bytes(tensor_size * 4)}], [${world_size}$], [${mean_time:.2e}$],')
-    
+def run_bench_multinode(backend, device_type):
+    rank = os.environ['RANK']
+    world_size = os.environ['WORLD_SIZE']
+    distributed_bench(rank, world_size, backend, device_type)
 
 def run_all_benches():
     for backend in ['gloo', 'nccl']:
@@ -71,6 +71,11 @@ def run_all_benches():
             for world_size in 2, 4, 6:
                 # print('running bench for', backend, device_type, tensor_size, world_size)
                 run_bench(backend, device_type, world_size)  # Loops tensor_sizes within run
+
+def run_all_benches_multinode():
+    for backend in ['gloo', 'nccl']:
+        for device_type in ['cpu', 'cuda'] if backend == 'gloo' else ['cuda']:
+            run_bench_multinode(backend, device_type)
 
 
 if __name__ == '__main__':
