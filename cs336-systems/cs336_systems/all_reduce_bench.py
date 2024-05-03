@@ -78,6 +78,5 @@ def run_all_benches_multinode():
             run_bench_multinode(backend, device_type)
 
 
-if __name__ == '__main__':
-    print('Running benches')
-    run_all_benches_multinode()
+print('Running benches')
+run_all_benches_multinode()
