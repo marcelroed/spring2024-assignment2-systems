@@ -49,8 +49,14 @@ class AdamW(torch.optim.Optimizer):
                 beta_1, beta_2 = group["betas"]
                 eps = group["eps"]
                 t = state.get("t", 1)
-                prev_m_t = state.get("m", torch.zeros_like(grad))
-                prev_v_t = state.get("v", torch.zeros_like(grad))
+
+                if "m" not in state:
+                    state["m"] = torch.zeros_like(grad)
+                if "v" not in state:
+                    state["v"] = torch.zeros_like(grad)
+
+                prev_m_t = state["m"]
+                prev_v_t = state["v"]
 
                 m_t = beta_1 * prev_m_t + ((1 - beta_1) * grad)
                 v_t = beta_2 * prev_v_t + ((1 - beta_2) * torch.square(grad))

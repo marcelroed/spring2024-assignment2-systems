@@ -22,6 +22,7 @@ def initialize_model(
     attn_pdrop: float | None = None,
     residual_pdrop: float | None = None,
     norm_class: type = RMSNorm,
+    device='cuda',
 ) -> BasicsTransformerLM:
     if d_ff is None:
         d_ff = 4 * d_model
@@ -36,10 +37,10 @@ def initialize_model(
         residual_pdrop=residual_pdrop,
         norm_class=norm_class,
     )
-    return model.to('cuda')
+    return model.to(device)
 
-def get_random_batch(batch_size: int, context_length: int, vocab_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.randint(0, vocab_size, (batch_size, context_length), device='cuda'), torch.randint(0, vocab_size, (batch_size, context_length), device='cuda')
+def get_random_batch(batch_size: int, context_length: int, vocab_size: int, device='cuda') -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.randint(0, vocab_size, (batch_size, context_length), device=device), torch.randint(0, vocab_size, (batch_size, context_length), device=device)
 
 def profile_model(model, batch, warmup_steps, profile_steps, passes: Literal['forward', 'backward', 'both'], mixed_precision=False):
     mp = torch.autocast('cuda', dtype=torch.bfloat16) if mixed_precision else nullcontext()

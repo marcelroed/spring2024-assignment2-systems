@@ -79,6 +79,7 @@ def run_all_benches_multinode(backend='nccl'):
 
 
 def main():
+    # Run this with torchrun!
     print('Running benches')
     run_all_benches_multinode(backend='nccl')
 
