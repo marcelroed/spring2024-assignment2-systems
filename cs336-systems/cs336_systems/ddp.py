@@ -8,6 +8,7 @@ from cs336_systems.profile_script import initialize_model, configs, get_random_b
 from cs336_basics.nn_utils import cross_entropy
 from cs336_basics.optimizer import AdamW
 from copy import deepcopy
+from torch import nn
 
 def setup():
     dist.init_process_group(backend='nccl', timeout=timedelta(seconds=60))
@@ -90,8 +91,84 @@ def ddp_train(do_comparison=False, flatten=True):
 
     # torch.use_deterministic_algorithms(False)
 
+def ddp_train_with_module():
+    setup()
+    batch_size = 2
+    context_length = 128
+    vocab_size = 10_000
+    rank = int(os.environ['RANK'])
+    local_rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{local_rank}'
+    torch.random.manual_seed(0)
+    # torch.use_deterministic_algorithms(True)
+    batch = get_random_batch(batch_size, context_length, vocab_size=vocab_size, device=device)
+
+    dist.broadcast(batch[0], 0)
+    dist.broadcast(batch[1], 0)
+
+    local_batch_size = batch_size // world_size
+    # local_batch_x = batch[0][:]
+    # local_batch_y = batch[1][:]
+
+    local_batch_x = batch[0][local_rank * local_batch_size:(local_rank + 1) * local_batch_size]
+    local_batch_y = batch[1][local_rank * local_batch_size:(local_rank + 1) * local_batch_size]
+
+    for model_name, config in configs.items():
+        model = initialize_model(**config, context_length=context_length, vocab_size=vocab_size, device=device)
+        model = DDP(model)
+        optimizer = AdamW(model.parameters(), lr=1e-3)
+        for i in range(5):
+            if i == 4 and rank == 0:
+                start = timer()
+            optimizer.zero_grad()
+            logits = model(local_batch_x)
+            loss = cross_entropy(logits, local_batch_y)
+            loss.backward()
+            model.finish_gradient_synchronization()
+
+            optimizer.step()
+            torch.cuda.synchronize()
+            if i == 4 and rank == 0:
+                end = timer()
+                print(f'[{model_name}], [{end - start:.2e}],')
+
+
 def main():
-    ddp_train(do_comparison=False, flatten=True)
+    # ddp_train(do_comparison=False, flatten=True)
+
+    ddp_train_with_module()
+
+
+class DDP(nn.Module):
+    def __init__(self, module: torch.nn.Module):
+        super(DDP, self).__init__()
+        self.module = module
+        self.back_handles = []
+        self.post_acc_handles = []
+        def transform_grad(param):
+            with torch.no_grad():
+                param.grad.data /= dist.get_world_size()
+            handle = dist.all_reduce(param.grad.data, op=dist.ReduceOp.SUM, async_op=True)
+            self.back_handles.append(handle)
+
+        for parameter in self.module.parameters():
+            dist.broadcast(parameter.data, 0)
+            if parameter.requires_grad:
+                self.post_acc_handles.append(
+                    parameter.register_post_accumulate_grad_hook(transform_grad)
+                )
+
+    def __del__(self):
+        for handle in self.post_acc_handles:
+            handle.remove()
+    
+    def forward(self, *inputs, **kwargs):
+        return self.module.forward(*inputs, **kwargs)
+    
+    def finish_gradient_synchronization(self):
+        while self.back_handles:
+            self.back_handles.pop().wait()
 
 
 if __name__ == '__main__':
