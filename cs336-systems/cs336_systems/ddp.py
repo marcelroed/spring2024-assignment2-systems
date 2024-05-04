@@ -16,7 +16,7 @@ def mprint(*args, **kwargs):
     if int(os.environ['RANK']) == 0:
         print(*args, **kwargs)
 
-def ddp_train(do_comparison=False):
+def ddp_train(do_comparison=False, flatten=True):
     print('Setting up process group')
     setup()
     print('Starting training')
@@ -57,8 +57,15 @@ def ddp_train(do_comparison=False):
             loss = cross_entropy(logits, local_batch_y)
             loss.backward()
 
-            for param in model.parameters():
-                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, async_op=False)
+            if flatten:
+                grads = torch._utils._flatten_dense_tensors(tensors=[param.grad for param in model.parameters()])
+                dist.all_reduce(grads, op=dist.ReduceOp.AVG, async_op=False)
+                grads = torch._utils._unflatten_dense_tensors(flat=grads, tensors=[param.grad for param in model.parameters()])
+                for param, grad in zip(model.parameters(), grads):
+                    param.grad[:] = grad
+            else:
+                for param in model.parameters():
+                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, async_op=False)
             
             optimizer.step()
             torch.cuda.synchronize()
@@ -84,7 +91,7 @@ def ddp_train(do_comparison=False):
     # torch.use_deterministic_algorithms(False)
 
 def main():
-    ddp_train(do_comparison=False)
+    ddp_train(do_comparison=False, flatten=True)
 
 
 if __name__ == '__main__':
