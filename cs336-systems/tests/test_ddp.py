@@ -171,7 +171,7 @@ def _test_DistributedDataParallelCPU(
             for non_parallel_model_parameter, ddp_model_parameter in zip(
                 non_parallel_model.parameters(), ddp_model.parameters()
             ):
-                assert torch.allclose(non_parallel_model_parameter, ddp_model_parameter)
+                torch.testing.assert_close(non_parallel_model_parameter, ddp_model_parameter)
 
         # Shuffle the data so that during the next iteration, each DDP rank sees a different set of inputs.
         # We make sure to use the same seed when shuffling (else the per-rank examples might not be disjoint).
