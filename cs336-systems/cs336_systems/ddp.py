@@ -14,9 +14,22 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from torch.optim import Optimizer
 from contextlib import nullcontext
 from collections import defaultdict
+from itertools import zip_longest
 
 def ceildiv(a, b):
     return -(-a // b)
+
+def interleave(a, b):
+    return [val for pair in zip_longest(a, b) for val in pair if val is not None]
+
+def format_bytes(size):
+    power = 2**10
+    n = 0
+    power_labels = {0: 'B', 1: 'KiB', 2: 'MiB', 3: 'GiB'}
+    while size > power:
+        size /= power
+        n += 1
+    return f'{size:.2f} {power_labels[n]}'
 
 def setup():
     dist.init_process_group(backend='nccl', timeout=timedelta(seconds=60))
@@ -149,23 +162,6 @@ def ddp_train_with_module(prof=None, use_configs=None):
         prof.step()
 
 
-PROFILE = True
-def main():
-    # ddp_train(do_comparison=False, flatten=True)
-
-    with (profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
-        schedule=torch.profiler.schedule(wait=1, warmup=4, active=1),
-        record_shapes=True,
-        profile_memory=False,
-        with_stack=True,
-    ) if PROFILE else nullcontext()) as prof:
-        prof.step()
-        ddp_train_with_module(prof, 'xl')
-    prof.export_stacks(f'stacks{os.environ["RANK"]}.txt', 'self_cuda_time_total')
-    print(prof.key_averages().table(sort_by='cpu_time_total', row_limit=50))
-
 
 class DDP(nn.Module):
     def __init__(self, module: torch.nn.Module):
@@ -288,9 +284,11 @@ class DDPBucketed(nn.Module):
 class ShardedOptimizer(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], optimizer_cls: Type[Optimizer], **kwargs: Any):
         params = list(params)
-        self.optimizer = optimizer_cls(params, **kwargs)
         self.param_group_shard_size = {}
         self.belongs_to_shard = {}
+        self.optimizer_cls = optimizer_cls
+        self.optimizer_kwargs = kwargs
+        self.optimizer = None
         super(ShardedOptimizer, self).__init__(params, {})
 
     def step(self, closure=None, **kwargs):
@@ -298,13 +296,20 @@ class ShardedOptimizer(Optimizer):
         self._synchronize_params()
     
     def _synchronize_params(self):
+        handles = []
         for param, rank in self.belongs_to_shard.items():
-            dist.broadcast(param.data, rank)
+            param: nn.Parameter
+            handles.append(dist.broadcast(param.data, rank, async_op=True))
+
+        for handle in handles:
+            handle.wait()
 
     def add_param_group(self, param_group: dict[str, Any]):
         n_shards = dist.get_world_size()
         rank = dist.get_rank()
         shard_param_group = defaultdict(list)
+        super().add_param_group(param_group)
+
         for group_name, params in param_group.items():
             group_size_bytes = sum(p.data.nbytes for p in params)
             shard_size = ceildiv(group_size_bytes, n_shards)
@@ -318,7 +323,102 @@ class ShardedOptimizer(Optimizer):
                 if rank == for_rank:
                     shard_param_group[group_name].append(p)
                 current_start_byte += p.data.nbytes
-        super(ShardedOptimizer, self).add_param_group(shard_param_group)
+
+        # Set up optimizer if necessary
+        if self.optimizer is None:
+            self.optimizer = self.optimizer_cls(shard_param_group['params'], **self.optimizer_kwargs)
+            del self.optimizer_kwargs
+        else:
+            self.optimizer.add_param_group(shard_param_group)
+
+
+def sharded_measure_peak_memory(*, shard_optimizer: bool):
+    dist.init_process_group(backend='nccl')
+    rank = dist.get_rank()
+    torch.random.manual_seed(0)
+    device = f'cuda:{rank}'
+    batch = get_random_batch(2, 128, 10_000, device=device)
+    model = initialize_model(**configs['xl'], context_length=128, vocab_size=10_000, device=device)
+    if shard_optimizer:
+        optimizer = ShardedOptimizer(model.parameters(), AdamW, lr=1e-3)
+    else:
+        optimizer = AdamW(model.parameters(), lr=1e-3)
+    print(f'[Rank {rank}] After init: {format_bytes(torch.cuda.max_memory_allocated(device))}'); torch.cuda.reset_peak_memory_stats(device)
+
+    parameter_bytes = sum(param.data.nbytes for param in model.parameters())
+    print(f'[Rank {rank}] Parameter bytes: {format_bytes(parameter_bytes)}')
+
+    model.forward(batch[0])
+    loss = cross_entropy(model(batch[0]), batch[1])
+    loss.backward()
+    gradient_bytes = sum(param.grad.nbytes for param in model.parameters() if param.grad is not None)
+    print(f'[Rank {rank}] Gradients bytes: {format_bytes(gradient_bytes)}')
+
+    print(f'[Rank {rank}] Before optimizer step: {format_bytes(torch.cuda.max_memory_allocated(device))}'); torch.cuda.reset_peak_memory_stats(device)
+    optimizer.step()
+    if shard_optimizer:
+        state_bytes = sum(s.nbytes for p in optimizer.optimizer.state.values() for s in p.values() if torch.is_tensor(s))
+    else:
+        state_bytes = sum(s.nbytes for p in optimizer.state.values() for s in p.values() if torch.is_tensor(s))
+    print(f'[Rank {rank}] State bytes: {format_bytes(state_bytes)}')
+    print(f'[Rank {rank}] After optimizer step: {format_bytes(torch.cuda.max_memory_allocated(device))}'); torch.cuda.reset_peak_memory_stats(device)
+
+def sharded_measure_time():
+    dist.init_process_group(backend='nccl')
+    rank = dist.get_rank()
+    torch.random.manual_seed(0)
+    device = f'cuda:{rank}'
+    batch = get_random_batch(2, 128, 10_000, device=device)
+    for config_name, config in configs.items():
+        mprint(f'[{config_name}], ', end='')
+        for shard_optimizer in [False, True]:
+            model = initialize_model(**config, context_length=128, vocab_size=10_000, device=device)
+            if shard_optimizer:
+                optimizer = ShardedOptimizer(model.parameters(), AdamW, lr=1e-3)
+            else:
+                optimizer = AdamW(model.parameters(), lr=1e-3)
+
+            for _ in range(5):
+                model.forward(batch[0])
+                loss = cross_entropy(model(batch[0]), batch[1])
+                loss.backward()
+                optimizer.step()
+
+            torch.cuda.synchronize()
+            start = timer()
+            for _ in range(5):
+                model.forward(batch[0])
+                loss = cross_entropy(model(batch[0]), batch[1])
+                loss.backward()
+                optimizer.step()
+            torch.cuda.synchronize()
+            end = timer()
+            time = (end - start) / 5
+            mprint(f'[{time:.2e}], ', end='')
+        mprint()
+
+PROFILE = True
+def main():  # Should be run with torchrun
+    # ddp_train(do_comparison=False, flatten=True)
+
+    # ()
+    # with (profile(
+    #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #     experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
+    #     schedule=torch.profiler.schedule(wait=1, warmup=4, active=1),
+    #     record_shapes=True,
+    #     profile_memory=False,
+    #     with_stack=True,
+    # ) if PROFILE else nullcontext()) as prof:
+    #     prof.step()
+    #     ddp_train_with_module(prof, 'xl')
+    # prof.export_stacks(f'stacks{os.environ["RANK"]}.txt', 'self_cuda_time_total')
+    # print(prof.key_averages().table(sort_by='cpu_time_total', row_limit=50))
+
+    # sharded_measure_peak_memory(shard_optimizer=True)
+    # sharded_measure_peak_memory(shard_optimizer=False)
+
+    sharded_measure_time()
 
 
 if __name__ == '__main__':
