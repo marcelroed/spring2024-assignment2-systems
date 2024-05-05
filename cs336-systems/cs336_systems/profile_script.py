@@ -12,6 +12,16 @@ from contextlib import nullcontext
 from torch.profiler import profile, record_function, ProfilerActivity
 import gc
 
+def format_bytes(size):
+    power = 2**10
+    n = 0
+    power_labels = {0: 'B', 1: 'KiB', 2: 'MiB', 3: 'GiB'}
+    while size > power:
+        size /= power
+        n += 1
+    return f'${size:.2f}$ {power_labels[n]}'
+
+
 def initialize_model(
     d_model: int,
     num_layers: int,
@@ -219,41 +229,86 @@ def norm_bench(include_backward: bool):
             seen_rms_norm = True
 
 def memory_profile(enable_backward: bool, enable_optimizer: bool, mixed_precision: bool = False):
-    torch.cuda.memory._record_memory_history(max_entries=1_000_000)
-    n_steps = 3
+    with (nullcontext() if enable_backward else torch.no_grad()):
+        torch.cuda.memory._record_memory_history(max_entries=1_000_000)
+        n_steps = 3
 
-    model = initialize_model(**configs['xl'])
-    device = model.lm_head.weight.device
-    batch = get_random_batch(batch_size=args.batch_size, context_length=128, vocab_size=10_000)
-    optimizer = AdamW(model.parameters(), lr=1e-4)
+        model = initialize_model(**configs['2.7B'])
+        device = model.lm_head.weight.device
+        batch = get_random_batch(batch_size=args.batch_size, context_length=128, vocab_size=10_000)
+        optimizer = AdamW(model.parameters(), lr=1e-4)
 
-    # warmup
-    loss = cross_entropy(model(batch[0]), batch[1])
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad(set_to_none=True)
-    torch.cuda.synchronize()
+        # warmup
+        loss = cross_entropy(model(batch[0]), batch[1])
+        if enable_backward:
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+        torch.cuda.synchronize()
 
-    with profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-        schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=n_steps),
-        experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
-    ) as prof:
-        for _ in range(n_steps):
-            # Run on a batch
-            run_step(model, batch, optimizer, enable_backward=enable_backward, enable_optimizer=enable_optimizer, mixed_precision=mixed_precision)
-            prof.step()
-        # Save timeline
-        prof.export_memory_timeline('timeline.html', device=device)
-    torch.cuda.memory._dump_snapshot('memory_snapshot.pickle')
-    torch.cuda.memory._record_memory_history(enabled=None)
+        with profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=n_steps),
+            experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        ) as prof:
+            for _ in range(n_steps):
+                # Run on a batch
+                run_step(model, batch, optimizer, enable_backward=enable_backward, enable_optimizer=enable_optimizer, mixed_precision=mixed_precision)
+                prof.step()
+            # Save timeline
+            prof.export_memory_timeline(f'timeline{enable_backward=}{enable_optimizer=}.html', device=device)
+        torch.cuda.memory._dump_snapshot(f'memory_snapshot{enable_backward=}{enable_optimizer=}.pickle')
+        torch.cuda.memory._record_memory_history(enabled=None)
     
+def peak_memory_usage():
+    device = 'cuda:0'
+    for config_name, config in configs.items():
+        for full_step in [False, True]:
+            with nullcontext() if full_step else torch.no_grad():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+                model = initialize_model(**config, device=device)
+                batch = get_random_batch(batch_size=args.batch_size, context_length=128, vocab_size=10_000, device=device)
+                optimizer = AdamW(model.parameters(), lr=1e-3)
+                loss = cross_entropy(model(batch[0]), batch[1])
+                if full_step:
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                torch.cuda.synchronize(device=device)
+                peak_usage = torch.cuda.max_memory_allocated(device=device)
+                print(f'[{config_name}], [{"full step" if full_step else "forward"}], [{format_bytes(peak_usage)}],')
+                del model, batch, optimizer, loss
+
+def peak_memory_usage_mixed():
+    device = 'cuda:0'
+    config = configs['2.7B']
+    for full_step in [False, True]:
+        with (nullcontext() if full_step else torch.no_grad()), torch.autocast('cuda', dtype=torch.bfloat16):
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            model = initialize_model(**config, device=device)
+            batch = get_random_batch(batch_size=args.batch_size, context_length=128, vocab_size=10_000, device=device)
+            optimizer = AdamW(model.parameters(), lr=1e-3)
+            loss = cross_entropy(model(batch[0]), batch[1])
+            if full_step:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            torch.cuda.synchronize(device=device)
+            peak_usage = torch.cuda.max_memory_allocated(device=device)
+            print(f'[$2.7$B], [{"full step" if full_step else "forward"}], [{format_bytes(peak_usage)}],')
+            del model, batch, optimizer, loss
+
+
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -282,6 +337,9 @@ if __name__ == '__main__':
     # perform_all_profiles_norm(include_warmup=True, mixed_precision=False, compile=False, passes=['forward', 'both'])
 
     # (memory_profiling)
-    memory_profile(enable_backward=False, enable_optimizer=False, mixed_precision=False)
+    # memory_profile(enable_backward=True, enable_optimizer=True, mixed_precision=False)
+
+    peak_memory_usage()
+    # peak_memory_usage_mixed()
 
 

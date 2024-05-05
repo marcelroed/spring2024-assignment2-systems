@@ -31,8 +31,15 @@ def format_bytes(size):
         n += 1
     return f'{size:.2f} {power_labels[n]}'
 
-def setup():
-    dist.init_process_group(backend='nccl', timeout=timedelta(seconds=60))
+def format_seconds(s):
+    if s < 1:
+        res = f'${s * 1000:#.3g}$ ms'
+    else:
+        res = f'${s:#.3g}$ s'
+    return res.replace('.$', '$')
+
+def setup(backend='nccl'):
+    dist.init_process_group(backend=backend, timeout=timedelta(seconds=60))
 
 def mprint(*args, **kwargs):
     if int(os.environ['RANK']) == 0:
@@ -277,9 +284,55 @@ class DDPBucketed(nn.Module):
             handle, params, flat_grad = self.back_handles.pop(0)
             handle.wait()
             new_grads = torch._utils._unflatten_dense_tensors(flat_grad, params)
+            del flat_grad
             for param, new_grad in zip(params, new_grads):
                 param.grad.data[:] = new_grad
 
+
+def ddp_train_bucketed(backend='nccl'):
+    setup(backend)
+    batch_size = 2
+    context_length = 128
+    vocab_size = 10_000
+    rank = int(os.environ['RANK'])
+    local_rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{local_rank}'
+    torch.random.manual_seed(0)
+    # torch.use_deterministic_algorithms(True)
+    batch = get_random_batch(batch_size, context_length, vocab_size=vocab_size, device=device)
+    dist.broadcast(batch[0], 0)
+    dist.broadcast(batch[1], 0)
+
+    local_batch_size = batch_size // world_size
+    # local_batch_x = batch[0][:]
+    # local_batch_y = batch[1][:]
+
+    local_batch_x = batch[0][local_rank * local_batch_size:(local_rank + 1) * local_batch_size]
+    local_batch_y = batch[1][local_rank * local_batch_size:(local_rank + 1) * local_batch_size]
+
+    for model_name, config in configs.items():
+        if model_name not in ['small', 'medium', 'large']:
+            continue
+        for bucket_size_mb in [5, 10, 50, 100, 500]:
+            model = initialize_model(**config, context_length=context_length, vocab_size=vocab_size, device=device)
+            model = DDPBucketed(model, bucket_size_mb=bucket_size_mb)
+            optimizer = AdamW(model.parameters(), lr=1e-3)
+            for i in range(5):
+                if i == 4 and rank == 0:
+                    start = timer()
+                optimizer.zero_grad()
+                logits = model(local_batch_x)
+                loss = cross_entropy(logits, local_batch_y)
+                loss.backward()
+                model.finish_gradient_synchronization()
+                optimizer.step()
+                torch.cuda.synchronize()
+                if i == 4 and rank == 0:
+                    end = timer()
+                    print(f'[{backend.upper()}], [{model_name}], [${bucket_size_mb}$], [{format_seconds(end - start)}],')
+        
+    # torch.use_deterministic_algorithms(False)
                 
 class ShardedOptimizer(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], optimizer_cls: Type[Optimizer], **kwargs: Any):
@@ -384,6 +437,14 @@ def sharded_measure_time():
                 loss = cross_entropy(model(batch[0]), batch[1])
                 loss.backward()
                 optimizer.step()
+                if not shard_optimizer:
+                    handles = []
+                    for param in model.parameters():
+                        param.grad /= dist.get_world_size()
+                        handle = dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, async_op=True)
+                        handles.append(handle)
+                    for handle in handles:
+                        handle.wait()
 
             torch.cuda.synchronize()
             start = timer()
@@ -397,10 +458,10 @@ def sharded_measure_time():
             time = (end - start) / 5
             mprint(f'[{time:.2e}], ', end='')
         mprint()
-
+    
 PROFILE = True
 def main():  # Should be run with torchrun
-    # ddp_train(do_comparison=False, flatten=True)
+    ddp_train(do_comparison=False, flatten=True)
 
     # ()
     # with (profile(
@@ -416,10 +477,12 @@ def main():  # Should be run with torchrun
     # prof.export_stacks(f'stacks{os.environ["RANK"]}.txt', 'self_cuda_time_total')
     # print(prof.key_averages().table(sort_by='cpu_time_total', row_limit=50))
 
+    # ddp_train_bucketed('nccl')
+
     # sharded_measure_peak_memory(shard_optimizer=True)
     # sharded_measure_peak_memory(shard_optimizer=False)
 
-    sharded_measure_time()
+    # sharded_measure_time()
 
 
 if __name__ == '__main__':
