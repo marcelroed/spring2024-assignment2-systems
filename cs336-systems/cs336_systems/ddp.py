@@ -150,11 +150,8 @@ def ddp_train_with_module(prof=None, use_configs=None):
         model = initialize_model(**config, context_length=context_length, vocab_size=vocab_size, device=device)
         model = DDP(model)
         optimizer = AdamW(model.parameters(), lr=1e-3)
+        prof.step()
         for i in range(5):
-            if prof is not None:
-                prof.step()
-            if i == 4 and rank == 0:
-                start = timer()
             optimizer.zero_grad()
             logits = model(local_batch_x)
             loss = cross_entropy(logits, local_batch_y)
@@ -163,10 +160,7 @@ def ddp_train_with_module(prof=None, use_configs=None):
 
             optimizer.step()
             torch.cuda.synchronize()
-            if i == 4 and rank == 0:
-                end = timer()
-                print(f'[{model_name}], [{end - start:.2e}],')
-        prof.step()
+            prof.step()
 
 
 
@@ -461,21 +455,25 @@ def sharded_measure_time():
     
 PROFILE = True
 def main():  # Should be run with torchrun
-    ddp_train(do_comparison=False, flatten=True)
+    # ddp_train(do_comparison=False, flatten=True)
 
-    # ()
-    # with (profile(
-    #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-    #     experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
-    #     schedule=torch.profiler.schedule(wait=1, warmup=4, active=1),
-    #     record_shapes=True,
-    #     profile_memory=False,
-    #     with_stack=True,
-    # ) if PROFILE else nullcontext()) as prof:
-    #     prof.step()
-    #     ddp_train_with_module(prof, 'xl')
-    # prof.export_stacks(f'stacks{os.environ["RANK"]}.txt', 'self_cuda_time_total')
-    # print(prof.key_averages().table(sort_by='cpu_time_total', row_limit=50))
+    # (ddp_overlap_individual_parameters_benchmarking)
+    trace_handler = torch.profiler.tensorboard_trace_handler(dir_name='trace', use_gzip=True)
+    with (profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        # experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=1, repeat=1),
+        on_trace_ready=trace_handler,
+        record_shapes=True,
+        profile_memory=False,
+        with_stack=True,
+    ) if PROFILE else nullcontext()) as prof:
+        ddp_train_with_module(prof, 'xl')
+    if dist.get_rank() == 0:
+        pass
+        # prof.export_chrome_trace(f'chrome_trace_overlap{os.environ["RANK"]}.json')
+        # prof.export_stacks(f'stacks{os.environ["RANK"]}.txt', 'self_cuda_time_total')
+        # print(prof.key_averages().table(sort_by='cpu_time_total', row_limit=50))
 
     # ddp_train_bucketed('nccl')
 
