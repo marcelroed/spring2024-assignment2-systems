@@ -52,7 +52,7 @@ python -u -m torch.distributed.run \
     --local-addr $MASTER_ADDR \
     --role `hostname -s`: \
     --tee 3 \
-    cs336-systems/cs336_systems/arb.py
+    cs336-systems/cs336_systems/arbench.py
 
 note: adapt MASTER_ADDR to node rank 0's hostname if it's not a SLURM environment where it's derived automatically
 
