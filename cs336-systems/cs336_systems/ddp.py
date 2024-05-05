@@ -366,8 +366,9 @@ def sharded_measure_peak_memory(*, shard_optimizer: bool):
 def sharded_measure_time():
     dist.init_process_group(backend='nccl')
     rank = dist.get_rank()
+    local_rank = int(os.environ['LOCAL_RANK'])
     torch.random.manual_seed(0)
-    device = f'cuda:{rank}'
+    device = f'cuda:{local_rank}'
     batch = get_random_batch(2, 128, 10_000, device=device)
     for config_name, config in configs.items():
         mprint(f'[{config_name}], ', end='')
