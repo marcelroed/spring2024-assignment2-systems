@@ -440,6 +440,7 @@ def sharded_measure_time():
                 if not shard_optimizer:
                     handles = []
                     for param in model.parameters():
+                        param.grad /= dist.get_world_size()
                         handle = dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, async_op=True)
                         handles.append(handle)
                     for handle in handles:
@@ -460,7 +461,7 @@ def sharded_measure_time():
     
 PROFILE = True
 def main():  # Should be run with torchrun
-    # ddp_train(do_comparison=False, flatten=True)
+    ddp_train(do_comparison=False, flatten=True)
 
     # ()
     # with (profile(
@@ -481,7 +482,7 @@ def main():  # Should be run with torchrun
     # sharded_measure_peak_memory(shard_optimizer=True)
     # sharded_measure_peak_memory(shard_optimizer=False)
 
-    sharded_measure_time()
+    # sharded_measure_time()
 
 
 if __name__ == '__main__':
